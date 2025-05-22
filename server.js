@@ -29,99 +29,21 @@ app.use((req, res, next) => {
 });
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true,useFindAndModify: false, })
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB connection error:', err));
 
 // User Schema
 const userSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true },
   username: { type: String, required: true },
-  email: { type: String, required: true, unique: true }, // Make email unique
   password: { type: String, required: true },
-  
+  otp: { type: String, default: null }, // Add this field
+  otpExpiresAt: { type: Date, default: null }, // Add this field
 });
 
 const User = mongoose.model('User', userSchema);
-
-app.set('timeout', 60000); // Set timeout to 60 seconds
-
-
-// Signup Route
-app.post('/api/send-otp', (req, res) => {
-  const { email } = req.body;
-
-  if (!email) {
-    return res.status(400).json({ message: 'Email is required' });
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000); // Generate 6-digit OTP
-  otpStore.set(email, otp); // Store OTP in memory
-
-  // Send OTP via email
-  const mailOptions = {
-    from: 'your-email@gmail.com',
-    to: email,
-    subject: 'Your OTP for Signup',
-    text: `Your OTP is: ${otp}`,
-  };
-
-  transporter.sendMail(mailOptions, (error) => {
-    if (error) {
-      console.error('Error sending OTP:', error);
-      return res.status(500).json({ message: 'Failed to send OTP' });
-    }
-    console.log(`OTP sent to ${email}: ${otp}`);
-    res.status(200).json({ message: 'OTP sent successfully' });
-  });
-});
-
-// Endpoint to Verify OTP
-app.post('/api/verify-otp', (req, res) => {
-  const { email, otp } = req.body;
-
-  if (!email || !otp) {
-    return res.status(400).json({ message: 'Email and OTP are required' });
-  }
-
-  const storedOtp = otpStore.get(email);
-
-  if (parseInt(otp) === storedOtp) {
-    otpStore.delete(email); // Remove OTP after successful verification
-    res.status(200).json({ message: 'OTP verified successfully' });
-  } else {
-    res.status(400).json({ message: 'Invalid OTP' });
-  }
-});
-
-// Endpoint to Finalize Signup
-
- 
-  app.post('/api/signup', async (req, res) => {
-    const { username, email, password } = req.body;
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ username, email, password: hashedPassword });
-  
-    try {
-      if (!username || !email || !password) {
-        return res.status(400).json({ message: 'All fields are required' });
-      }
-      await user.save();
-      console.log('User created:', user);
-      res.status(201).send({ message: 'User created successfully' });
-    } catch (error) {
-      console.error('Error creating user:', error.message);
-      if (error.code === 11000) {
-        if (error.keyValue && error.keyValue.email) {
-          return res.status(400).send({ message: 'Email already exists' });
-        } else if (error.keyValue && error.keyValue.username) {
-          return res.status(400).send({ message: 'Username already exists' });
-        }
-      } else {
-        return res.status(500).send('Error creating user: ' + error.message);
-      }
-    }
-  });
-  
+module.exports = User;
 
 // Login Route
 app.post('/api/login', async (req, res) => {
@@ -140,9 +62,8 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).send('Invalid credentials: User not found');
     }
 
-    // Compare the hashed password
-    const passwordMatch = await bcrypt.compare(password, user.password);
-    if (!passwordMatch) {
+    // Directly compare password without hashing
+    if (password !== user.password) {
       console.warn('Login failed: Incorrect password'); // Log warning
       return res.status(401).send('Invalid credentials: Incorrect password');
     }
@@ -152,11 +73,11 @@ app.post('/api/login', async (req, res) => {
     return res.status(200).send({ message: 'Login successful', token: 'your_generated_token_here' }); // Send a token or user info if needed
 
   } catch (error) {
-    
     console.error('Server error during login:', error.message); // Log server error
     res.status(500).send('Server error: ' + error.message);
   }
 });
+
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -218,37 +139,55 @@ app.post('/api/forgot-password', async (req, res) => {
   }
 });
 
-// Verify OTP Endpoint
+//
 app.post('/api/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
 
+  // Validate request body
   if (!email || !otp) {
-    return res.status(400).json({ message: 'Email and OTP are required' });
+    return res.status(400).json({ message: 'Email and OTP are required.' });
   }
 
   try {
     // Find the user by email
     const user = await User.findOne({ email });
-    if (!user || user.otp !== otp) {
-      return res.status(400).json({ message: 'Invalid OTP' });
+    console.log('Fetched User:', user); // Debugging: Check fetched user
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    // Check if OTP is set for the user
+    if (!user.otp) {
+      console.log('User OTP not set:', user.otp); // Debugging: Check OTP field
+      return res
+        .status(400)
+        .json({ message: 'No OTP found for this user. Please request a new OTP.' });
+    }
+
+    // Compare provided OTP with stored OTP
+    if (user.otp.toString() !== otp.toString()) {
+      console.log(`Invalid OTP. Provided: ${otp}, Stored: ${user.otp}`); // Debugging
+      return res.status(400).json({ message: 'Invalid OTP.' });
     }
 
     // Check if the OTP has expired
     if (new Date() > user.otpExpiresAt) {
-      return res.status(400).json({ message: 'OTP has expired' });
+      return res.status(400).json({ message: 'OTP has expired. Please request a new OTP.' });
     }
 
-    // Clear the OTP after successful verification
+    // OTP is valid, clear it from the database
     user.otp = null;
     user.otpExpiresAt = null;
-    await User.save();
+    await user.save();
 
-    res.json({ message: 'OTP verified successfully' });
+    res.json({ message: 'OTP verified successfully.' });
   } catch (error) {
     console.error('Error verifying OTP:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    res.status(500).json({ message: 'Internal server error.' });
   }
 });
+
 app.post('/api/reset-password', async (req, res) => {
   const { email, newPassword } = req.body;
 
@@ -272,6 +211,84 @@ app.post('/api/reset-password', async (req, res) => {
   }
 });
 
+
+const otpSchema = new mongoose.Schema({
+  email: { type: String, unique: true },
+  otp: Number,
+  createdAt: { type: Date, default: Date.now, expires: 600 },
+});
+const OTP = mongoose.model('OTP', otpSchema);
+const transporter1 = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: 'h8702643@gmail.com', // Your email address
+    pass: 'osxarglpzcircimn' // Use App Password instead of your Google account password
+  },
+  tls: {
+    rejectUnauthorized: false // Disable unauthorized rejection for certain connections
+  }
+});
+
+// Endpoint: Send OTP
+app.post('/api/send-otp1', async (req, res) => {
+try {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ message: 'Email is required' });
+
+  const otp = Math.floor(50000 + Math.random() * 900000); // Generate 6-digit OTP
+
+  // Save OTP in one atomic operation
+  await OTP.findOneAndUpdate(
+    { email },
+    { otp, createdAt: new Date() },
+    { upsert: true, new: true }
+  );
+
+  // Send OTP via email using transporter1
+  await transporter1.sendMail({
+    to: email,
+    subject: 'Your OTP Code',
+    text: `Your OTP code is ${otp}. It is valid for 10 minutes.`,
+  });
+
+  res.json({ message: 'OTP sent successfully' });
+} catch (error) {
+  console.error('Error sending OTP:', error);
+  res.status(500).json({ message: 'Error sending OTP' });
+}
+});
+
+// Endpoint: Verify Signup
+app.post('/api/verify-signup', async (req, res) => {
+  try {
+    const { username, email, password, otp } = req.body;
+
+    if (!username || !email || !password || !otp)
+      return res.status(400).json({ message: 'All fields are required' });
+
+    // Validate OTP
+    const otpRecord = await OTP.findOne({ email });
+    if (!otpRecord || otpRecord.otp !== parseInt(otp))
+      return res.status(400).json({ message: 'Invalid OTP' });
+
+    // Save new user
+    const user = new User({ username, email, password });
+    await user.save();
+    console.log('New User:', user);
+
+    // Delete OTP after success
+    await OTP.deleteOne({ email });
+
+    res.json({ message: 'Signup successful' });
+  } catch (error) {
+    console.error('Error during signup:', error);
+    if (error.code === 11000 && error.keyPattern && error.keyPattern.email) {
+      res.status(400).json({ message: 'Email already registered' });
+    } else {
+      res.status(500).json({ message: 'Error during signup' });
+    }
+  }
+});
 app.get('/api/users', async (req, res) => {
   try {
     const users = await User.find();
@@ -294,15 +311,44 @@ app.get('/api/users', async (req, res) => {
 // Get All Users Route
 // Get All Users Route
 // Delete User Route
+const deletedUserSchema = new mongoose.Schema({
+  username: String,
+  email: { type: String, unique: true },
+  password: String,
+  deletedAt: { type: Date, default: Date.now },
+});
+
+const DeletedUser = mongoose.model('DeletedUser', deletedUserSchema);
+
 app.delete('/api/users/:id', async (req, res) => {
   const userId = req.params.id;
 
   try {
-    const deletedUser = await User.findByIdAndDelete(userId);
-    if (!deletedUser) {
+    // Step 1: Find the user to delete
+    const user = await User.findById(userId);
+    if (!user) {
       return res.status(404).send({ message: 'User not found' });
     }
-    res.status(200).send({ message: 'User deleted successfully' });
+
+    // Step 2: Store the user in the deleted users collection (allow duplicates)
+    const deletedUser = {
+      username: user.username,
+      email: user.email,
+      password: user.password, // Be cautious when storing passwords; in a real system, you'd want to hash it first
+      deletedAt: new Date(),
+    };
+
+    // Use findOneAndUpdate to allow duplicates and upsert the record
+    await DeletedUser.findOneAndUpdate(
+      { email: user.email }, // Match on email to handle duplicates
+      deletedUser, // Update the user data
+      { upsert: true, new: true } // Create if it doesn't exist
+    );
+
+    // Step 3: Delete the user from the User collection
+    await User.findByIdAndDelete(userId);
+
+    res.status(200).send({ message: 'User deleted and stored in the deleted users collection' });
   } catch (err) {
     console.error('Error deleting user:', err);
     res.status(500).send({ message: 'Failed to delete user', error: err.message });
@@ -456,12 +502,11 @@ async function uploadImageToImgBB(imageBuffer) {
   }
 }
 const imageSchema = new mongoose.Schema({
-  data: Buffer,
   contentType: String,
   url: String, // Store the ImgBB URL here
 });
 
-const Image = mongoose.model('Image', imageSchema);
+const Image = mongoose.model('Image1', imageSchema);
 
 module.exports = Image;
 // API endpoint to handle image upload
@@ -478,157 +523,65 @@ app.post('/upload2', upload.single('image'), async (req, res) => {
       return res.status(500).json({ error: 'Failed to upload image to ImgBB' });
     }
 
-    // Save the image data (image URL) to MongoDB
+    // Save only the URL and content type to MongoDB
     const newImage = new Image({
-      data: req.file.buffer,
       contentType: req.file.mimetype,
       url: imageUrl, // Save ImgBB URL in the database
     });
 
     await newImage.save();
+
+    // Return the image URL immediately after upload
     res.status(200).json({
       message: 'Image uploaded successfully',
-      imageUrl: imageUrl
+      imageUrl: imageUrl, // Directly return the uploaded image URL
     });
   } catch (error) {
     console.error('Error handling upload:', error);
     res.status(500).json({ error: 'Failed to upload image' });
   }
 });
-// Express server example
-app.get('/images', async (req, res) => {
+// Endpoint to refresh image data
+app.post('/refresh-images', async (req, res) => {
   try {
-    const images = await Image.find();  // Find all image documents
-    const imageUrls = images.map(image => image.url);  // Extract URL from each document
+    console.log("Refreshing image data...");
+    
+    // Add your logic to refresh the image data here
+    // For example, synchronizing data from external sources, cleaning up old images, etc.
+    // If no specific refresh logic is required, you can skip this step.
+    // Simulating a refresh process
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate a delay for the refresh
 
-    // Optional: Set cache headers to allow the browser to cache the images for faster loading
-    res.setHeader('Cache-Control', 'public, max-age=31536000');  // Cache images for a year
-
-    res.json(imageUrls);  // Send back an array of image URLs as JSON
-    console.log("Images fetched");
+    console.log("Image data refreshed successfully");
+    res.status(200).json({ message: 'Image data refreshed successfully' });
   } catch (err) {
+    console.error("Error refreshing image data:", err);
+    res.status(500).json({ error: 'Failed to refresh image data' });
+  }
+});
+
+// Endpoint to fetch image URLs
+app.get('/images1', async (req, res) => {
+  try {
+    const images = await Image.find()
+      .sort({ _id: -1 }) // Sort by most recent
+      .limit(10)         // Limit to 10 records
+      .lean();           // Use lean query for faster data retrieval
+
+    const imageUrls = images.map(image => image.url);
+
+    res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache images for a year
+    res.json(imageUrls);
+    console.log("Images fetched successfully");
+  } catch (err) {
+    console.error("Error fetching images:", err);
     res.status(500).json({ error: 'Failed to fetch images' });
   }
 });
 
-app.use(express.json());
 
-// Function to generate OTP
-function generateOtp() {
-  return Math.floor(100000 + Math.random() * 900000).toString(); // Generates a 6-digit OTP
-}
 
-app.post('/api/sendOtp', (req, res) => {
-  const { email } = req.body;
 
-  if (!email) {
-    return res.status(400).json({ message: 'Email is required' });
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString(); // Generate a 6-digit OTP
-  const normalizedEmail = email.trim().toLowerCase();
-
-  otpStore[normalizedEmail] = { otp, timestamp: Date.now() };
-  console.log('OTP generated and stored:', otpStore[normalizedEmail]);
-
-  // Simulate sending OTP (in real case, integrate an email/SMS service)
-  res.status(200).json({ message: 'OTP sent successfully', otp }); // Remove OTP from response in production
-});
-
-otpStore={}
-// API to send OTP to the user's email
-app.post('/api/signup1', (req, res) => {
-  const { email } = req.body;
-
-  if (!email) {
-    return res.status(400).json({ message: 'Email is required' });
-  }
-
-  const otp = generateOtp();
-  otpStore[email] = otp; // Store OTP temporarily in memory
-
-  // Setup Nodemailer transporter
-  const transporter = nodemailer.createTransport({
-    service: 'gmail', // You can use other services (e.g., SendGrid, Mailgun)
-    auth: {
-      user: process.env.EMAIL_USER, // Use your email
-      pass:process.env.EMAIL_PASS ,  // Use your email password or app password
-    },
-  });
-
-  // Send OTP email
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: email,
-    subject: 'Your OTP for Signup',
-    text: `Your OTP is ${otp}. Please use this OTP to verify your account.`,
-  };
-
-  transporter.sendMail(mailOptions, (err, info) => {
-    if (err) {
-      return res.status(500).json({ message: 'Error sending OTP', error: err });
-    }
-    console.log(`OTP sent to ${email}: ${otp}`);
-    res.status(200).json({ message: 'OTP sent successfully' });
-    console.log('OTP sent successfully');
-  });
-});
-
-// API to verify the OTP
-// Replace with a proper store like Redis in production
-
-app.post('/api/verifyOtp', async (req, res) => {
-  const { email, username, password, otp } = req.body;
-
-  // Validate request fields
-  if (!email || !otp || !username || !password) {
-    return res.status(400).json({ message: 'Email, OTP, username, and password are required' });
-  }
-
-  const normalizedEmail = email.trim().toLowerCase();
-  console.log('Normalized email:', normalizedEmail);
-
-  // Retrieve OTP data from otpStore
-  const otpData = otpStore[normalizedEmail];
-  console.log('Retrieved OTP data:', otpData);
-
-  // Verify OTP
-  if (!otpData || String(otpData) !== String(otp)) {
-    return res.status(400).json({ message: 'Invalid OTP. Please try again.' });
-  }
-
-  // Delete OTP after successful verification
-  delete otpStore[normalizedEmail];
-
-  try {
-    // Hash the password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create a new user instance
-    const user = new User({ username: username.trim(), email: normalizedEmail, password: hashedPassword });
-
-    // Save the user
-    await user.save();
-
-    console.log('User created:', user);
-    return res.status(201).json({ message: 'User created successfully' });
-  } catch (error) {
-    console.error('Error creating user:', error.message);
-
-    // Handle duplicate key error
-    if (error.code === 11000) {
-      if (error.keyValue && error.keyValue.email) {
-        return res.status(400).json({ message: 'Email already exists' });
-      }
-      if (error.keyValue && error.keyValue.username) {
-        return res.status(400).json({ message: 'Username already exists' });
-      }
-    }
-
-    // Generic error response
-    return res.status(500).json({ message: 'Error creating user', error: error.message });
-  }
-});
 
 
 app.put('/api/events/:id', async (req, res) => {
@@ -933,34 +886,97 @@ app.get('/api/userRoles/hiddenYears', async (req, res) => {
     res.status(500).json({ message: 'Failed to retrieve hidden years', error });
   }
 });
+require('dotenv').config(); // load .env variables FIRST
+const cloudinary = require('cloudinary').v2;
 
-app.post('/send', (req, res) => {
-  const { name, email, message } = req.body;
-
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.EMAIL_USER, // Use environment variable
-      pass: process.env.EMAIL_PASS  // Use environment variable
-    },
-  });
-
-  const mailOptions = {
-    from: email,
-    to: 'v.gugan16@gmail.com',
-    subject: `Message from ${name}`,
-    text: `You have received a new message from your portfolio form.\n\nHere are the details:\n\nName: ${name}\nEmail: ${email}\nMessage: ${message}`
-  };
-
-  transporter.sendMail(mailOptions, (error, info) => {
-    if (error) {
-      return res.status(500).json({ error: error.toString() }); // Send JSON response with error
-    }
-    res.status(200).json({ message: 'Email sent: ' + info.response }); // Send JSON response on success
-  });
+const fs = require('fs');
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
-  
 
+const upload4 = multer({ dest: 'uploads/' });
+
+const productSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  specification: { type: String, required: true },
+  category: { type: String, required: true },
+  images: [{ type: String, required: true }]  // array of image URLs
+});
+
+const Product = mongoose.model('Product1', productSchema);
+
+// Accept any number of photos
+app.post('/upload-product', upload4.array('photos'), async (req, res) => {
+  const { name, specification, category } = req.body;
+
+  if (!name || !specification || !category) {
+    return res.status(400).json({ error: 'Missing name, specification, or category' });
+  }
+
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: 'At least 1 photo is required' });
+  }
+
+  try {
+    const uploadedUrls = [];
+
+    for (const file of req.files) {
+      const result = await cloudinary.uploader.upload(file.path);
+      fs.unlinkSync(file.path);  // Delete temp file
+
+      if (result.secure_url) {
+        uploadedUrls.push(result.secure_url);
+      } else {
+        return res.status(500).json({ error: 'Cloudinary upload failed' });
+      }
+    }
+
+    const productData = new Product({
+      name,
+      specification,
+      category,
+      images: uploadedUrls,
+    });
+
+    const savedProduct = await productData.save();
+
+    return res.status(200).json({
+      message: 'Product uploaded and saved successfully',
+      product: savedProduct,
+    });
+  } catch (err) {
+    console.error('Upload error:', err);
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+
+
+app.get('/products', async (req, res) => {
+  try {
+    const products = await Product.find(); // Fetch all products
+    res.status(200).json(products);
+  } catch (err) {
+    console.error('Fetch error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+app.delete('/products/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await Product.findByIdAndDelete(id);
+
+    if (!deleted) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    res.status(200).json({ message: 'Product deleted successfully' });
+  } catch (err) {
+    console.error('Delete error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // Start the server
 app.listen(PORT, () => {
