@@ -899,20 +899,45 @@ cloudinary.config({
 const upload4 = multer({ dest: 'uploads/' });
 
 const productSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  specification: { type: String, required: true },
-  category: { type: String, required: true },
-  images: [{ type: String, required: true }]  // array of image URLs
+  
+  name: String,
+  specifications: [
+    {
+      type: { type: String},
+      detail: { type: String}
+    }
+  ],
+  category: String,
+  images: [String]
 });
 
 const Product = mongoose.model('Product1', productSchema);
 
 // Accept any number of photos
-app.post('/upload-product', upload4.array('photos'), async (req, res) => {
-  const { name, specification, category } = req.body;
+app.get('/categories', async (req, res) => {
+  try {
+    // Get distinct category values from the 'products' collection
+    const categories = await Product.distinct('category');
+    res.json(categories);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to fetch categories' });
+  }
+});
 
-  if (!name || !specification || !category) {
-    return res.status(400).json({ error: 'Missing name, specification, or category' });
+
+app.post('/upload-product', upload4.array('photos'), async (req, res) => {
+  const { name, specifications, category } = req.body;
+
+  if (!name || !specifications || !category) {
+    return res.status(400).json({ error: 'Missing name, specifications, or category' });
+  }
+
+  let specsArray;
+  try {
+    specsArray = JSON.parse(specifications); // parse JSON string
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid specifications format' });
   }
 
   if (!req.files || req.files.length === 0) {
@@ -924,10 +949,13 @@ app.post('/upload-product', upload4.array('photos'), async (req, res) => {
 
     for (const file of req.files) {
       const result = await cloudinary.uploader.upload(file.path);
-      fs.unlinkSync(file.path);  // Delete temp file
+      fs.unlinkSync(file.path);
 
       if (result.secure_url) {
+        console.log(result.secure_url);
+
         uploadedUrls.push(result.secure_url);
+        console.log(uploadedUrls);
       } else {
         return res.status(500).json({ error: 'Cloudinary upload failed' });
       }
@@ -935,13 +963,13 @@ app.post('/upload-product', upload4.array('photos'), async (req, res) => {
 
     const productData = new Product({
       name,
-      specification,
+      specifications: specsArray,
       category,
       images: uploadedUrls,
     });
 
     const savedProduct = await productData.save();
-
+    console.log(productData);
     return res.status(200).json({
       message: 'Product uploaded and saved successfully',
       product: savedProduct,
@@ -951,8 +979,6 @@ app.post('/upload-product', upload4.array('photos'), async (req, res) => {
     return res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
-
-
 app.get('/products', async (req, res) => {
   try {
     const products = await Product.find(); // Fetch all products
@@ -977,7 +1003,186 @@ app.delete('/products/:id', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+const careerSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email address']
+  },
+  username: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  phone: {
+    type: String,
+    required: true,
+    match: [/^[0-9]{10}$/, 'Phone number must be 10 digits']
+  },
+  city: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  state: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  resumeUrl: {
+    type: String,
+    required: false, // Make true if resume is mandatory
+    trim: true
+  }
+}, {
+  timestamps: true
+});
 
+const upload6 = multer({ dest: 'uploads/' });
+
+
+const Career = mongoose.model('Career', careerSchema);
+
+app.post('/career', upload6.single('resume'), async (req, res) => {
+  try {
+    const { email, username, phone, city, state } = req.body;
+
+    let resumeUrl = null;
+    if (req.file) {
+      const result = await cloudinary.uploader.upload(req.file.path);
+      resumeUrl = result.secure_url;
+      fs.unlinkSync(req.file.path); // Clean up local file
+    }
+
+    const career = new Career({
+      email,
+      username,
+      phone,
+      city,
+      state,
+      resumeUrl // Add this field in your schema if you haven't
+    });
+
+    await career.save();
+    console.log("Cared submittes");
+        res.status(201).json({ message: "Career form submitted successfully", data: career });
+  } catch (err) {
+    res.status(400).json({ message: "Failed to submit", error: err.message });
+  }
+});
+app.get('/career', async (req, res) => {
+  try {
+    const careers = await Career.find();
+    res.status(200).json(careers);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch careers", error: err.message });
+  }
+});
+app.get('/products/:id', async (req, res) => {
+  const productId = req.params.id;
+
+  try {
+    const product = await Product.findById(productId);
+    if (!product) {
+      return res.status(404).send({ error: 'Product not found' });
+    }
+    res.json(product);
+  } catch (err) {
+    res.status(500).send({ error: 'Server error' });
+  }
+});
+const uploadEdit = multer({ storage: storage });
+app.put('/products/:id', uploadEdit.array('newImages'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, category, specifications, existingImages } = req.body;
+    
+    console.log('Request Body:', req.body);
+    console.log('Uploaded Files:', req.files);
+    const parsedSpecs = JSON.parse(specifications || '[]');
+    const parsedExistingImages = JSON.parse(existingImages || '[]');
+
+    const newUploadedUrls = [];
+
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        // Convert buffer to base64 for Cloudinary upload
+        const base64Image = file.buffer.toString('base64');
+        const result = await cloudinary.uploader.upload(`data:${file.mimetype};base64,${base64Image}`);
+        console.log(result);
+        
+        if (result.secure_url) newUploadedUrls.push(result.secure_url);
+      }
+    }
+
+    const updatedProduct = await Product.findByIdAndUpdate(
+      id,
+      {
+        name,
+        category,
+        specifications: parsedSpecs,
+        images: [...parsedExistingImages, ...newUploadedUrls],
+      },
+      { new: true }
+    );
+
+    if (!updatedProduct) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    res.status(200).json({ message: 'Product updated successfully', product: updatedProduct });
+  } catch (err) {
+    console.error('Update error:', err);
+    res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+app.get('/products1', async (req, res) => { 
+  const category = req.query.category;
+
+  try {
+    const products = await Product.find({ category: category }); // strict match
+    res.json(products);
+  } catch (error) {
+    console.error('Error fetching products:', error);
+    res.status(500).send('Server error');
+  }
+});
+
+const EMAIL_USER = 'h8702643@gmail.com';
+const EMAIL_PASS = 'osxarglpzcircimn';
+// Endpoint to handle form submission
+app.post('/send', async (req, res) => {
+  const { name, email, message } = req.body;
+
+  try {
+    // Send confirmation email to user
+    await transporter.sendMail({
+      from: `"Support" <${EMAIL_USER}>`,
+      to: email,
+      subject: 'Message Successfully Received',
+      html: `<p>Dear ${name},</p><p>Your message has been successfully received. We'll get back to you shortly.</p><p>Thank you!</p>`,
+    });
+
+    // Send email to admin
+    await transporter.sendMail({
+      from: `"Contact Form" <${EMAIL_USER}>`,
+      to: 'v.gugan16@gmail.com',
+      subject: 'New Contact Form Submission',
+      html: `
+        <h3>New Contact Form Submission</h3>
+        <p><strong>Name:</strong> ${name}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Message:</strong><br/>${message}</p>
+      `,
+    });
+
+    res.status(200).json({ message: 'Emails sent successfully!' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to send emails.' });
+  }
+});
 // Start the server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
